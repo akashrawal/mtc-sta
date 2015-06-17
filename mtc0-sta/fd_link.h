@@ -20,7 +20,7 @@
 
 //TODO: Documentation
 
-int mtc_fd_set_blocking(int fd, int val)
+int mtc_fd_set_blocking(int fd, int val);
 
 
 /**Creates a new link that works with file descriptors.
@@ -58,5 +58,9 @@ int mtc_fd_link_get_close_fd(MtcLink *link);
  *            0 otherwise.
  */
 void mtc_fd_link_set_close_fd(MtcLink *link, int val);
+
+void mtc_fd_link_set_blocking(MtcLink *link, int val);
+
+void mtc_fd_link_clear_fcntl_cache(MtcLink *link);
 
 

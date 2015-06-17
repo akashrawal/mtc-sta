@@ -35,6 +35,6 @@ AC_FUNC_REALLOC
 AC_CONFIG_FILES([Makefile
                  data/Makefile
                  data/mtc0-sta.pc
-                 mtc0-glib/Makefile
+                 mtc0-sta/Makefile
                  ])
 AC_OUTPUT

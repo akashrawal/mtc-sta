@@ -20,12 +20,12 @@
 
 #include "common.h"
 
-
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/uio.h>
 
+//TODO: Refactor
 #ifndef EWOULDBLOCK
 #define MTC_IO_TEMP_ERROR(e) ((e == EAGAIN) || (e == EINTR))
 #else
@@ -42,46 +42,6 @@ typedef enum
 	//No error
 	MTC_IO_OK = 0,
 	//Temporary error
-#include <sys/uio.h>
-
-#ifndef EWOULDBLOCK
-#define MTC_IO_TEMP_ERROR(e) ((e == EAGAIN) || (e == EINTR))
-#else
-#if (EAGAIN == EWOULDBLOCK)
-#define MTC_IO_TEMP_ERROR(e) ((e == EAGAIN) || (e == EINTR))
-#else
-#define MTC_IO_TEMP_ERROR(e) ((e == EAGAIN) || (e == EWOULDBLOCK) || (e == EINTR))
-#endif
-#endif
-
-//Return status for IO operation
-typedef enum
-{	
-	//No error
-	MTC_IO_OK = 0,
-	//Temporary error
-	MTC_IO_TEMP = -1,
-	//End-of-file encountered while reading
-	MTC_IO_EOF = -2,
-	//Irrecoverable error
-	MTC_IO_SEVERE = -3
-} MtcIOStatus;
-
-//A simple reader
-typedef struct 
-{
-	void *mem;
-	size_t len;
-	int fd;
-} MtcReader;
-
-//Another simple reader but calls readv()
-typedef struct 
-{
-	struct iovec *blocks;
-	int n_blocks;
-	int fd;
-} MtcReaderV;
 	MTC_IO_TEMP = -1,
 	//End-of-file encountered while reading
 	MTC_IO_EOF = -2,
@@ -242,6 +202,99 @@ int mtc_fd_set_blocking(int fd, int val)
 /*-------------------------------------------------------------------*/
 //MtcFDLink
 
+
+//Internals
+
+//Common header for all types of data used on MtcFDLink
+//No padding to be assumed
+typedef struct
+{
+	//Magic values
+	char m, t, c, zero;
+	
+	//No. of blocks inside a message.
+	//MSB is one if link is to be stopped after receiving this
+	uint32_t size;
+	
+	//'block size index' (BSI)
+	//Indicates size of each extra block followed by the actual data.
+	uint32_t data[];
+} MtcHeader;
+
+//Structure containing only useful data elements from MtcHeader
+typedef struct 
+{
+	uint32_t size, data_1;
+	int stop;
+} MtcHeaderData;
+
+//Type for the buffer for message
+typedef struct {uint64_t data[2]; } MtcHeaderBuf;
+
+//Macro to calculate size of the header
+#define mtc_header_sizeof(size) (8 + (4 * (size)))
+
+//Macro to calculate minimum size of the header
+//It is the size of data that is read first by MtcFDLink which tells
+//about size of the rest of the header
+#define mtc_header_min_size (mtc_header_sizeof(1))
+
+
+//serialize the header for a message
+void mtc_header_write
+	(MtcHeaderBuf *buf, MtcMBlock *blocks, uint32_t n_blocks, int stop)
+{
+	char *buf_c = (char *) buf;
+	char *data_iter, *data_lim;
+	uint32_t size;
+	
+	buf_c[0] = 'M';
+	buf_c[1] = 'T';
+	buf_c[2] = 'C';
+	buf_c[3] = 0;
+	
+	size = n_blocks;
+	if (stop)
+		size |= (1 << 31);
+	mtc_uint32_copy_to_le(buf_c + 4, &size);
+	
+	data_iter = buf_c + 8;
+	data_lim = data_iter + (n_blocks * 4);
+	for (; data_iter < data_lim; data_iter += 4, blocks++)
+	{
+		uint32_t size = blocks->size;
+		mtc_uint32_copy_to_le(data_iter, &size);
+	}
+}
+
+//Deserialize the message header
+//returns zero for format errors
+int mtc_header_read(MtcHeaderBuf *buf, MtcHeaderData *res)
+{
+	char *buf_c = (char *) buf;
+	uint32_t size;
+	
+	if (buf_c[0] != 'M' 
+		|| buf_c[1] != 'T'
+		|| buf_c[2] != 'C'
+		|| buf_c[3] != 0)
+	{
+		return 0;
+	}
+	
+	mtc_uint32_copy_from_le(buf_c + 4, &size);
+	res->size = size & (~(((uint32_t) 1) << 31));
+	res->stop = size >> 31;
+	
+	if (res->size == 0)
+		return 0;
+	
+	mtc_uint32_copy_from_le(buf_c + 8, &(res->data_1));
+	
+	return 1;
+}
+
+
 //Stores information about current reading status
 typedef enum 
 {
@@ -307,16 +360,15 @@ typedef struct
 	//Event loop integration
 	MtcEventTestPollFD tests[2];
 	
+	//fcntl cache
+	struct 
+	{
+		int in, out;
+	} flcache;
+	
 	//Preallocated buffers
 	MtcHeaderBuf header;
 } MtcFDLink;
-
-//Event source
-typedef struct
-{
-	MtcLinkEventSource parent;
-	MtcFDLink *link;
-} MtcFDLinkEventSource;
 
 //Functions to manage IO vector
 static struct iovec *mtc_fd_link_alloc_iov
@@ -469,8 +521,8 @@ static void mtc_fd_link_queue
 	iov++;
 	for (i = 0; i < n_blocks; i++)
 	{
-		iov[i].iov_base = blocks[i].data;
-		iov[i].iov_len = blocks[i].len;
+		iov[i].iov_base = blocks[i].mem;
+		iov[i].iov_len = blocks[i].size;
 	}
 	
 	//Setup stop
@@ -666,7 +718,7 @@ static MtcLinkIOStatus mtc_fd_link_receive
 		//There's only one block.
 		blocks = mtc_msg_get_blocks(self->msg);
 		mtc_reader_init
-			(&(self->reader), blocks->data, blocks->len, self->in_fd);
+			(&(self->reader), blocks->mem, blocks->size, self->in_fd);
 		
 		//Save status
 		self->read_status = MTC_FD_LINK_SIMPLE;
@@ -765,8 +817,8 @@ static MtcLinkIOStatus mtc_fd_link_receive
 			
 			while (blocks < blocks_lim)
 			{
-				vector->iov_base = blocks->data;
-				vector->iov_len = blocks->len;
+				vector->iov_base = blocks->mem;
+				vector->iov_len = blocks->size;
 				
 				blocks++;
 				vector++;
@@ -817,8 +869,15 @@ static MtcLinkIOStatus mtc_fd_link_receive
 
 //Event management
 
+/*RULES: 
+ * - self->tests should be kept updated at all times.
+ * - mtc_event_source_prepare() to be called with self->tests 
+ * whenever mtc_link_get_events_enabled(self) and NULL otherwise
+ */
+
 #define define_out_idx \
 	int out_idx = (self->in_fd == self->out_fd ? 0 : 1)
+
 
 static void mtc_fd_link_calc_events
 	(MtcFDLink *self, int *events)
@@ -841,9 +900,10 @@ static void mtc_fd_link_event_source_event
 	(MtcEventSource *source, MtcEventFlags flags)
 {
 	MtcLinkEventSource *ev = (MtcLinkEventSource *) source;
-	MtcFDLink *self = (MtcFDLink *) ev->link;
+	MtcLink *link = ev->link;
+	MtcFDLink *self = (MtcFDLink *) link;
 	
-	mtc_event_source_ref(source);
+	mtc_link_ref(link);
 	
 	define_out_idx;
 	int status;
@@ -856,10 +916,13 @@ static void mtc_fd_link_event_source_event
 			|| self->tests[out_idx].revents & (MTC_POLLERR | MTC_POLLHUP | MTC_POLLNVAL))
 		{
 			mtc_link_break((MtcLink *) self);
-			if (mtc_event_source_get_active(source))
+			if (mtc_link_get_events_enabled(link))
 				(* ev->broken)((MtcLink *) self, ev->data);
 			goto end;
 		}
+		
+		//Nonblocking
+		mtc_fd_link_set_blocking((MtcLink *) self, 0);
 		
 		//Sending
 		if (self->tests[out_idx].revents & (MTC_POLLOUT))
@@ -867,12 +930,12 @@ static void mtc_fd_link_event_source_event
 			status = mtc_link_send((MtcLink *) self);
 			if (status == MTC_LINK_IO_STOP)
 			{
-				if (mtc_event_source_get_active(source))
+				if (mtc_link_get_events_enabled(link))
 					(* ev->stopped)((MtcLink *) self, ev->data);
 			}
 			else if (status == MTC_LINK_IO_FAIL)
 			{
-				if (mtc_event_source_get_active(source))
+				if (mtc_link_get_events_enabled(link))
 					(* ev->broken)((MtcLink *) self, ev->data);
 				goto end;
 			}
@@ -887,71 +950,94 @@ static void mtc_fd_link_event_source_event
 				
 				if (status == MTC_LINK_IO_OK)
 				{
-					if (mtc_event_source_get_active(source))
+					if (mtc_link_get_events_enabled(link))
 						(* ev->received) 
 							((MtcLink *) self, in_data, ev->data);
+					mtc_msg_unref(in_data.msg);
 				}
 				else if (status == MTC_LINK_IO_FAIL)
 				{
-					if (mtc_event_source_get_active(source))
+					if (mtc_link_get_events_enabled(link))
 						(* ev->broken)((MtcLink *) self, ev->data);
 					goto end;
 				}
 				else
+				{
 					break;
+				}
 			}
 		}
 	}
 	
 end:
-	mtc_event_source_unref(source);
+	mtc_link_unref(link);
 }
 
-static void mtc_fd_link_event_source_destroy(MtcEventSource *source)
-{
-	mtc_link_event_source_destroy((MtcLinkEventSource *) source);
-}
 
-static void mtc_fd_link_event_source_set_active
-	(MtcEventSource *source, int value)
-{
-	MtcLinkEventSource *ev = (MtcLinkEventSource *) source;
-	MtcFDLink *self = (MtcFDLink *) ev->link;
-	
-	if (value)
-	{
-		mtc_event_source_prepare
-			(source, (MtcEventTest *) self->tests);
-	}
-	else
-	{
-		mtc_event_source_prepare
-			(source, (MtcEventTest *) NULL);
-	}
-}
-
-static MtcEventSourceVTable mtc_fd_link_event_source_vtable = 
-{
-	mtc_fd_link_event_source_event, 
-	mtc_fd_link_event_source_destroy,
-	mtc_fd_link_event_source_set_active
-};
-
-static MtcLinkEventSource *mtc_fd_link_create_event_source
-	(MtcLink *link, MtcEventMgr *mgr)
+static void mtc_fd_link_set_events_enabled
+	(MtcLink *link, int value)
 {
 	MtcFDLink *self = (MtcFDLink *) link;
-	MtcFDLinkEventSource *source;
+	MtcEventSource *source = (MtcEventSource *) 
+		mtc_link_get_event_source(link);
+	
+	if (! mtc_link_is_broken(link))
+	{
+		if (value)
+		{
+			mtc_event_source_prepare
+				(source, (MtcEventTest *) self->tests);
+		}
+		else
+		{
+			mtc_event_source_prepare
+				(source, (MtcEventTest *) NULL);
+		}
+	}
+}
+
+static void mtc_fd_link_action_hook(MtcLink *link)
+{
+	MtcFDLink *self = (MtcFDLink *) link;
+	int events[2];
+	
+	MtcLinkEventSource *source = mtc_link_get_event_source(link);
+	
+	if (mtc_link_is_broken(link))
+	{
+		if (mtc_link_get_events_enabled(link))
+		{
+			mtc_event_source_prepare((MtcEventSource *) source, NULL);
+		}
+		return;
+	}
+	
+	mtc_fd_link_calc_events(self, events);
+	
+	if ((events[0] != self->tests[0].events) 
+		|| (events[1] != self->tests[1].events))
+	{
+		if (mtc_link_get_events_enabled(link))
+		{
+			mtc_event_source_prepare((MtcEventSource *) source, NULL);
+		}
+		self->tests[0].events = events[0];
+		self->tests[1].events = events[1];
+		if (mtc_link_get_events_enabled(link))
+		{
+			mtc_event_source_prepare
+				((MtcEventSource *) source, 
+				(MtcEventTest *) self->tests);
+		}
+	}
+}
+
+static void mtc_fd_link_init_event(MtcFDLink *self)
+{
 	define_out_idx;
 	int events[2];
 	MtcEventTest constdata = 
 		{NULL, {'p', 'o', 'l', 'l', 'f', 'd', '\0', '\0'}};
-	
-	source = (MtcFDLinkEventSource *) mtc_event_mgr_create_source
-		(mgr, sizeof(MtcFDLinkEventSource), 
-		&mtc_fd_link_event_source_vtable);
-	
-	mtc_link_event_source_init((MtcLinkEventSource *) source, link);
 	
 	//Initialize test data
 	mtc_fd_link_calc_events(self, events);
@@ -967,36 +1053,6 @@ static MtcLinkEventSource *mtc_fd_link_create_event_source
 	if (out_idx == 1)
 	{
 		self->tests[0].parent.next = (MtcEventTest *) self->tests + 1;
-	}
-	
-	return (MtcLinkEventSource *) source;
-}
-
-static void mtc_fd_link_action_hook(MtcLink *link)
-{
-	MtcFDLink *self = (MtcFDLink *) link;
-	int events[2];
-	
-	MtcFDLinkEventSource *source = (MtcFDLinkEventSource *)
-		mtc_link_get_event_source((MtcLink *) self);
-	
-	if (! source)
-		return;
-	
-	mtc_fd_link_calc_events(self, events);
-	
-	if ((events[0] != self->tests[0].events) 
-		|| (events[1] != self->tests[1].events))
-	{
-		mtc_event_source_prepare((MtcEventSource *) source, NULL);
-		self->tests[0].events = events[0];
-		self->tests[1].events = events[1];
-		if (mtc_event_source_get_active((MtcEventSource *) source))
-		{
-			mtc_event_source_prepare
-				((MtcEventSource *) source, 
-				(MtcEventTest *) self->tests);
-		}
 	}
 }
 
@@ -1038,14 +1094,16 @@ static void mtc_fd_link_finalize(MtcLink *link)
 	}
 }
 
-
 //VTable
 const static MtcLinkVTable mtc_fd_link_vtable = {
 	mtc_fd_link_queue,
 	mtc_fd_link_can_send,
 	mtc_fd_link_send,
 	mtc_fd_link_receive,
-	mtc_fd_link_create_event_source,
+	mtc_fd_link_set_events_enabled,
+	{
+		mtc_fd_link_event_source_event
+	},
 	mtc_fd_link_action_hook,
 	mtc_fd_link_finalize
 };
@@ -1072,6 +1130,12 @@ MtcLink *mtc_fd_link_new(int out_fd, int in_fd)
 	//Initialize reading data
 	self->read_status = MTC_FD_LINK_INIT_READ;
 	self->mem = self->msg = NULL;
+	
+	//Clear fcntl cache 
+	mtc_fd_link_clear_fcntl_cache((MtcLink *) self);
+	
+	//Initialize events
+	mtc_fd_link_init_event(self);
 	
 	return (MtcLink *) self;
 }
@@ -1114,5 +1178,57 @@ void mtc_fd_link_set_close_fd(MtcLink *link, int val)
 		mtc_error("%p is not MtcFDLink", link);
 	
 	self->close_fd = (val ? 1 : 0);
+}
+
+static int mtc_set_blocking_cached(int fd, int val, int cache)
+{
+	int new_cache;
+	
+	//Get older flags if required
+	if (cache < 0)
+	{
+		if ((cache = fcntl(fd, F_GETFL, 0)) < 0)
+			mtc_error("fcntl(%d, F_GETFL, 0): %s", 
+				fd, strerror(errno));
+	}
+	
+	//Compute new flags
+	if (val)
+		new_cache = cache & (~ O_NONBLOCK);
+	else
+		new_cache = cache | O_NONBLOCK;
+		
+	//Apply
+	if (new_cache != cache)
+	{
+		if (fcntl(fd, F_SETFL, new_cache) < 0)
+			mtc_error("fcntl(%d, F_SETFL, new_cache): %s", 
+				fd, strerror(errno));
+	}
+	
+	return new_cache;
+}
+
+void mtc_fd_link_set_blocking(MtcLink *link, int val)
+{
+	MtcFDLink *self = (MtcFDLink *) link;
+	
+	self->flcache.in = mtc_set_blocking_cached
+		(self->in_fd, val, self->flcache.in);
+	
+	//Same for out_fd
+	if (self->in_fd != self->out_fd)
+	{
+		self->flcache.out = mtc_set_blocking_cached
+			(self->out_fd, val, self->flcache.out);
+	}
+}
+
+void mtc_fd_link_clear_fcntl_cache(MtcLink *link)
+{
+	MtcFDLink *self = (MtcFDLink *) link;
+	
+	self->flcache.in = -1;
+	self->flcache.out = -1;
 }
 
