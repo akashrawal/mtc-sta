@@ -25,183 +25,6 @@
 #include <fcntl.h>
 #include <sys/uio.h>
 
-//TODO: Refactor
-#ifndef EWOULDBLOCK
-#define MTC_IO_TEMP_ERROR(e) ((e == EAGAIN) || (e == EINTR))
-#else
-#if (EAGAIN == EWOULDBLOCK)
-#define MTC_IO_TEMP_ERROR(e) ((e == EAGAIN) || (e == EINTR))
-#else
-#define MTC_IO_TEMP_ERROR(e) ((e == EAGAIN) || (e == EWOULDBLOCK) || (e == EINTR))
-#endif
-#endif
-
-//Return status for IO operation
-typedef enum
-{	
-	//No error
-	MTC_IO_OK = 0,
-	//Temporary error
-	MTC_IO_TEMP = -1,
-	//End-of-file encountered while reading
-	MTC_IO_EOF = -2,
-	//Irrecoverable error
-	MTC_IO_SEVERE = -3
-} MtcIOStatus;
-
-//A simple reader
-typedef struct 
-{
-	void *mem;
-	size_t len;
-	int fd;
-} MtcReader;
-
-//Another simple reader but calls readv()
-typedef struct 
-{
-	struct iovec *blocks;
-	int n_blocks;
-	int fd;
-} MtcReaderV;
-
-//Initializes the reader
-static void mtc_reader_init(MtcReader *self, void *mem, size_t len, int fd)
-{
-	self->mem = mem;
-	self->len = len;
-	self->fd  = fd;
-}
-
-//Reads some data. Returns no. of bytes remaining to be read, or one of 
-//MtcIOStatus in case of error.
-static MtcIOStatus mtc_reader_read(MtcReader *self)
-{
-	ssize_t bytes_read;
-	
-	//Precaution
-	if (! self->len)
-		return 0;
-	
-	//Read some data
-	bytes_read = read(self->fd, self->mem, self->len);
-	
-	//Error checking
-	if (bytes_read < 0)
-	{
-		if (MTC_IO_TEMP_ERROR(errno))
-			return MTC_IO_TEMP;
-		else
-			return MTC_IO_SEVERE;
-	}
-	else if (bytes_read == 0)
-		return MTC_IO_EOF;
-	else
-	{
-		//Successful read.
-		//Update and return status
-		self->mem = MTC_PTR_ADD(self->mem, bytes_read);
-		self->len -= bytes_read;
-		
-		if (self->len)
-			return MTC_IO_TEMP;
-		else
-			return MTC_IO_OK;
-	}
-}
-
-//Initializes the reader
-static void mtc_reader_v_init(MtcReaderV *self, struct iovec *blocks, int n_blocks, int fd)
-{
-	self->blocks = blocks;
-	self->n_blocks = n_blocks;
-	self->fd = fd;
-}
-
-//Reads some data. 
-static MtcIOStatus mtc_reader_v_read(MtcReaderV *self)
-{
-	ssize_t bytes_read;
-	
-	//Precaution
-	if (! self->n_blocks)
-		return 0;
-	
-	//Read some data
-	bytes_read = readv(self->fd, self->blocks, self->n_blocks);
-	
-	//Handle errors
-	if (bytes_read < 0)
-	{
-		if (MTC_IO_TEMP_ERROR(errno))
-			return MTC_IO_TEMP;
-		else
-			return MTC_IO_SEVERE;
-	}
-	else if (bytes_read == 0)
-		return MTC_IO_EOF;
-	else
-	{
-		while (bytes_read ? (self->blocks->iov_len <= bytes_read) : 0)
-		{
-			bytes_read -= self->blocks->iov_len;
-			self->blocks++;
-			self->n_blocks--;
-		}
-		
-		//Update the last partially read block
-		if (bytes_read)
-		{
-			self->blocks->iov_base 
-				= MTC_PTR_ADD(self->blocks->iov_base, bytes_read);
-			self->blocks->iov_len -= bytes_read;
-		}
-		
-		//return
-		if (self->n_blocks > 0)
-			return MTC_IO_TEMP;
-		else
-			return MTC_IO_OK;
-	}
-}
-
-//File descriptor utilities
-
-//Sets whether IO operations on fd should block
-//val<0 means do nothing
-int mtc_fd_set_blocking(int fd, int val)
-{
-	int stat_flags, res;
-	
-	//Get flags
-	stat_flags = fcntl(fd, F_GETFL, 0);
-	if (stat_flags < 0)
-		mtc_error("Failed to get file descriptor flags for file descriptor %d: %s",
-		          fd, strerror(errno));
-	
-	//Get current status
-	res = !(stat_flags & O_NONBLOCK);
-	
-	//Set non-blocking
-	if (val > 0)
-		stat_flags &= (~O_NONBLOCK);
-	else if (val == 0)
-		stat_flags |= O_NONBLOCK;
-	else
-		return res;
-	
-	//Set back the flags
-	if (fcntl(fd, F_SETFL, stat_flags) < 0)
-		mtc_error("Failed to set file descriptor flags for file descriptor %d: %s",
-		          fd, strerror(errno));
-	
-	return res;
-}
-
-
-/*-------------------------------------------------------------------*/
-//MtcFDLink
-
 
 //Internals
 
@@ -911,16 +734,6 @@ static void mtc_fd_link_event_source_event
 	
 	if (flags & MTC_EVENT_CHECK)
 	{
-		//Error condition
-		if (self->tests[0].revents & (MTC_POLLERR | MTC_POLLHUP | MTC_POLLNVAL)
-			|| self->tests[out_idx].revents & (MTC_POLLERR | MTC_POLLHUP | MTC_POLLNVAL))
-		{
-			mtc_link_break((MtcLink *) self);
-			if (mtc_link_get_events_enabled(link))
-				(* ev->broken)((MtcLink *) self, ev->data);
-			goto end;
-		}
-		
 		//Nonblocking
 		mtc_fd_link_set_blocking((MtcLink *) self, 0);
 		
@@ -931,13 +744,21 @@ static void mtc_fd_link_event_source_event
 			if (status == MTC_LINK_IO_STOP)
 			{
 				if (mtc_link_get_events_enabled(link))
-					(* ev->stopped)((MtcLink *) self, ev->data);
+					if (ev->stopped)
+						(* ev->stopped)((MtcLink *) self, ev->data);
 			}
 			else if (status == MTC_LINK_IO_FAIL)
 			{
 				if (mtc_link_get_events_enabled(link))
-					(* ev->broken)((MtcLink *) self, ev->data);
+					if (ev->broken)
+						(* ev->broken)((MtcLink *) self, ev->data);
 				goto end;
+			}
+			else if (status == MTC_LINK_IO_OK)
+			{
+				if (mtc_link_get_events_enabled(link))
+					if (ev->sent)
+						(* ev->sent)((MtcLink *) self, ev->data);
 			}
 		}
 		
@@ -951,14 +772,16 @@ static void mtc_fd_link_event_source_event
 				if (status == MTC_LINK_IO_OK)
 				{
 					if (mtc_link_get_events_enabled(link))
-						(* ev->received) 
-							((MtcLink *) self, in_data, ev->data);
+						if (ev->received)
+							(* ev->received) 
+								((MtcLink *) self, in_data, ev->data);
 					mtc_msg_unref(in_data.msg);
 				}
 				else if (status == MTC_LINK_IO_FAIL)
 				{
 					if (mtc_link_get_events_enabled(link))
-						(* ev->broken)((MtcLink *) self, ev->data);
+						if (ev->broken)
+							(* ev->broken)((MtcLink *) self, ev->data);
 					goto end;
 				}
 				else
@@ -1036,19 +859,14 @@ static void mtc_fd_link_init_event(MtcFDLink *self)
 {
 	define_out_idx;
 	int events[2];
-	MtcEventTest constdata = 
-		{NULL, {'p', 'o', 'l', 'l', 'f', 'd', '\0', '\0'}};
 	
 	//Initialize test data
 	mtc_fd_link_calc_events(self, events);
-	self->tests[0].parent = constdata;
-	self->tests[0].fd = self->in_fd;
-	self->tests[0].events = events[0];
-	self->tests[0].revents = 0;
-	self->tests[1].parent = constdata;
-	self->tests[1].fd = self->out_fd;
-	self->tests[1].events = events[1];
-	self->tests[1].revents = 0;
+	mtc_event_test_pollfd_init
+		(self->tests + 0, self->in_fd, events[0]);
+	mtc_event_test_pollfd_init
+		(self->tests + 1, self->out_fd, events[1]);
+
 	
 	if (out_idx == 1)
 	{
@@ -1102,7 +920,8 @@ const static MtcLinkVTable mtc_fd_link_vtable = {
 	mtc_fd_link_receive,
 	mtc_fd_link_set_events_enabled,
 	{
-		mtc_fd_link_event_source_event
+		mtc_fd_link_event_source_event,
+		MTC_EVENT_CHECK
 	},
 	mtc_fd_link_action_hook,
 	mtc_fd_link_finalize

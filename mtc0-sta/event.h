@@ -1,5 +1,5 @@
-/* common.h
- * Common includes
+/* event.h
+ * libevent based backend for MtcEventMgr
  * 
  * Copyright 2013 Akash Rawal
  * This file is part of MTC-Standalone.
@@ -18,25 +18,6 @@
  * along with MTC-Standalone.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-//Common header files
-#include <mtc0/mtc.h>
-#include <sys/socket.h>
-#include <event2/event.h>
+MtcEventMgr *mtc_lev_event_mgr_new
+	(struct event_base *base, int destroy_base);
 
-#ifndef _MTC_PUBLIC
-#include <string.h>
-#include <error.h>
-#include <assert.h>
-#endif
-
-#define _MTC_HEADER
-//Target related header files
-#ifndef _MTC_PUBLIC
-#include "io.h"
-#endif
-#include "event.h"
-#include "fd_link.h"
-#include "simple_router.h"
-#include "simple_server.h"
-
-#undef _MTC_HEADER

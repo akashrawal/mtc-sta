@@ -8,5 +8,5 @@ Description: Standalone implementations for various MTC interfaces
 Version: @VERSION@
 
 Requires: mtc0
-Libs: -lmtc0-sta
+Libs: -lmtc0-sta -levent_core
 Cflags:
