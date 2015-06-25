@@ -18,10 +18,16 @@
  * along with MTC-Standalone.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-//TODO: Documentation
+//TODO: Documentation category
 
+/**Convenient function to switch file descriptor between 
+ * blocking and nonblocking IO.
+ * \param fd The file descriptor
+ * \param val Positive to make it use blocking IO, 0 for nonblocking,
+ *            negative to keep it unchanged
+ * \return Nonzero if fd used blocking IO before, 0 if not
+ */
 int mtc_fd_set_blocking(int fd, int val);
-
 
 /**Creates a new link that works with file descriptors.
  * \param in_fd The file descriptor to receive from.
@@ -58,9 +64,5 @@ int mtc_fd_link_get_close_fd(MtcLink *link);
  *            0 otherwise.
  */
 void mtc_fd_link_set_close_fd(MtcLink *link, int val);
-
-void mtc_fd_link_set_blocking(MtcLink *link, int val);
-
-void mtc_fd_link_clear_fcntl_cache(MtcLink *link);
 
 

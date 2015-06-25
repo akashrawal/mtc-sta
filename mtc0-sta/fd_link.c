@@ -25,7 +25,6 @@
 #include <fcntl.h>
 #include <sys/uio.h>
 
-
 //Internals
 
 //Common header for all types of data used on MtcFDLink
@@ -182,12 +181,6 @@ typedef struct
 	
 	//Event loop integration
 	MtcEventTestPollFD tests[2];
-	
-	//fcntl cache
-	struct 
-	{
-		int in, out;
-	} flcache;
 	
 	//Preallocated buffers
 	MtcHeaderBuf header;
@@ -356,16 +349,12 @@ static void mtc_fd_link_queue
 	}
 }
 
-//Determines whether mtc_link_send will try to send any data.
-static int mtc_fd_link_can_send(MtcLink *link)
+//Determines whether link has any unsent data.
+static int mtc_fd_link_has_unsent_data(MtcLink *link)
 {
 	MtcFDLink *self = (MtcFDLink *) link;
 	
-	if (self->iov.clip > 0)
-		return 1;
-	else if (self->iov.clip == 0)
-		return 0;
-	else if (self->iov.len > 0)
+	if (self->iov.len > 0)
 		return 1;
 	else
 		return 0;
@@ -715,7 +704,7 @@ static void mtc_fd_link_calc_events
 		events[0] |= MTC_POLLIN;
 	
 	if ((mtc_link_get_out_status(link) == MTC_LINK_STATUS_OPEN) 
-		&& (mtc_fd_link_can_send(link)))
+		&& (mtc_fd_link_has_unsent_data(link)))
 		events[out_idx] |= MTC_POLLOUT;
 }
 
@@ -733,10 +722,7 @@ static void mtc_fd_link_event_source_event
 	MtcLinkInData in_data;
 	
 	if (flags & MTC_EVENT_CHECK)
-	{
-		//Nonblocking
-		mtc_fd_link_set_blocking((MtcLink *) self, 0);
-		
+	{	
 		//Sending
 		if (self->tests[out_idx].revents & (MTC_POLLOUT))
 		{
@@ -915,7 +901,7 @@ static void mtc_fd_link_finalize(MtcLink *link)
 //VTable
 const static MtcLinkVTable mtc_fd_link_vtable = {
 	mtc_fd_link_queue,
-	mtc_fd_link_can_send,
+	mtc_fd_link_has_unsent_data,
 	mtc_fd_link_send,
 	mtc_fd_link_receive,
 	mtc_fd_link_set_events_enabled,
@@ -949,9 +935,6 @@ MtcLink *mtc_fd_link_new(int out_fd, int in_fd)
 	//Initialize reading data
 	self->read_status = MTC_FD_LINK_INIT_READ;
 	self->mem = self->msg = NULL;
-	
-	//Clear fcntl cache 
-	mtc_fd_link_clear_fcntl_cache((MtcLink *) self);
 	
 	//Initialize events
 	mtc_fd_link_init_event(self);
@@ -997,57 +980,5 @@ void mtc_fd_link_set_close_fd(MtcLink *link, int val)
 		mtc_error("%p is not MtcFDLink", link);
 	
 	self->close_fd = (val ? 1 : 0);
-}
-
-static int mtc_set_blocking_cached(int fd, int val, int cache)
-{
-	int new_cache;
-	
-	//Get older flags if required
-	if (cache < 0)
-	{
-		if ((cache = fcntl(fd, F_GETFL, 0)) < 0)
-			mtc_error("fcntl(%d, F_GETFL, 0): %s", 
-				fd, strerror(errno));
-	}
-	
-	//Compute new flags
-	if (val)
-		new_cache = cache & (~ O_NONBLOCK);
-	else
-		new_cache = cache | O_NONBLOCK;
-		
-	//Apply
-	if (new_cache != cache)
-	{
-		if (fcntl(fd, F_SETFL, new_cache) < 0)
-			mtc_error("fcntl(%d, F_SETFL, new_cache): %s", 
-				fd, strerror(errno));
-	}
-	
-	return new_cache;
-}
-
-void mtc_fd_link_set_blocking(MtcLink *link, int val)
-{
-	MtcFDLink *self = (MtcFDLink *) link;
-	
-	self->flcache.in = mtc_set_blocking_cached
-		(self->in_fd, val, self->flcache.in);
-	
-	//Same for out_fd
-	if (self->in_fd != self->out_fd)
-	{
-		self->flcache.out = mtc_set_blocking_cached
-			(self->out_fd, val, self->flcache.out);
-	}
-}
-
-void mtc_fd_link_clear_fcntl_cache(MtcLink *link)
-{
-	MtcFDLink *self = (MtcFDLink *) link;
-	
-	self->flcache.in = -1;
-	self->flcache.out = -1;
 }
 

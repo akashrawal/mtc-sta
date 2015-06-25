@@ -24,7 +24,6 @@
 #include <mtc0-sta/simple_router_declares.h>
 #include <mtc0-sta/simple_router_defines.h>
 
-//TODO: Cross-check effect of 'dispose' for every function
 
 typedef struct _MtcSimplePeer MtcSimplePeer;
 
@@ -44,6 +43,15 @@ struct _MtcSimpleRouter
 	MtcRouter parent;
 	
 	MtcRing peers;
+	
+	struct
+	{
+		struct event_base *base;
+		MtcEventMgr *mgr;
+		MtcEventBackend *backend;
+		MtcSimplePeer *peer;
+	} sync_cache;
+	
 	MtcLinkAsyncFlush *flush;
 };
 
@@ -84,6 +92,54 @@ static void mtc_simple_router_init_ring(MtcSimpleRouter *self)
 	sentinel->prev = sentinel;
 }
 
+//Sync cache management
+static void mtc_simple_router_init_sync_cache(MtcSimpleRouter *self)
+{
+	self->sync_cache.base = event_base_new();
+	self->sync_cache.mgr = mtc_lev_event_mgr_new
+		(self->sync_cache.base, 1);
+	self->sync_cache.backend = NULL;
+	self->sync_cache.peer = NULL;
+}
+
+static void mtc_simple_router_clear_sync_cache
+	(MtcSimpleRouter *self, MtcSimplePeer *clear_for)
+{
+	if (self->sync_cache.peer == clear_for)
+	{
+		mtc_event_backend_destroy(self->sync_cache.backend);
+		self->sync_cache.backend = NULL;
+		self->sync_cache.peer = NULL;
+	}
+}
+
+static void mtc_simple_router_set_sync_cache
+	(MtcSimpleRouter *self, MtcSimplePeer *peer)
+{
+	if (self->sync_cache.peer != peer)
+	{
+		if (self->sync_cache.peer)
+		{
+			mtc_event_backend_destroy(self->sync_cache.backend);
+			self->sync_cache.backend = NULL;
+			self->sync_cache.peer = NULL;
+		}
+		if (peer)
+		{
+			self->sync_cache.peer = peer;
+			self->sync_cache.backend = mtc_event_mgr_back
+				(self->sync_cache.mgr, (MtcEventSource *) 
+				mtc_link_get_event_source(peer->link));
+		}
+	}
+}
+
+static void mtc_simple_router_destroy_sync_cache
+	(MtcSimpleRouter *self)
+{
+	mtc_simple_router_set_sync_cache(self, NULL);
+	mtc_event_mgr_unref(self->sync_cache.mgr);
+}
 
 //IO management
 static void mtc_simple_peer_set_backend
@@ -111,6 +167,8 @@ static void mtc_simple_peer_close(MtcSimplePeer *peer)
 		MtcSimpleRouter *router = (MtcSimpleRouter *) 
 			mtc_peer_get_router(peer);
 		
+		mtc_simple_router_clear_sync_cache(router, peer);
+		
 		mtc_simple_peer_remove(peer);
 		
 		mtc_link_async_flush_add(router->flush, peer->link);
@@ -123,6 +181,11 @@ static void mtc_simple_peer_discard(MtcSimplePeer *peer)
 {
 	if (peer->link)
 	{
+		MtcSimpleRouter *router = (MtcSimpleRouter *) 
+			mtc_peer_get_router(peer);
+		
+		mtc_simple_router_clear_sync_cache(router, peer);
+		
 		mtc_simple_peer_remove(peer);
 		
 		mtc_simple_peer_set_backend(peer, NULL);
@@ -251,40 +314,23 @@ static void mtc_simple_peer_sendto(MtcPeer *p,
 	MtcSimpleMail__free(&mail);
 }
 
-//TODO: Implement using events after implementing?
 static int mtc_simple_peer_sync_io_step(MtcPeer *p)
 {
-	//MtcSimpleRouter *self = (MtcSimpleRouter *) router;
 	MtcSimplePeer *peer = (MtcSimplePeer *) p;
-	MtcLinkInData in_data;
-	MtcLinkIOStatus status;
+	MtcSimpleRouter *router = (MtcSimpleRouter *) 
+		mtc_peer_get_router(peer);
+	int status;
 	
-	//Do nothing if disposed
-	if (! peer->link)
+	mtc_simple_router_set_sync_cache(router, peer);
+	
+	status = event_base_loop(router->sync_cache.base, EVLOOP_ONCE);
+	
+	if (status < 0)
 		return -1;
-	
-	mtc_fd_link_set_blocking(peer->link, 1);
-	
-	status = mtc_link_send(peer->link);
-	
-	if (status != MTC_LINK_IO_OK)
-		goto fail;
-	
-	status = mtc_link_receive(peer->link, &in_data);
-	
-	if (status != MTC_LINK_IO_OK)
-		goto fail;
-	
-	mtc_simple_peer_deliver(peer, in_data);
-	
-	mtc_msg_unref(in_data.msg);
-	
-	return 0;
-fail:
-	if (status != MTC_LINK_IO_TEMP)
-		mtc_simple_peer_broken_respond(peer);
-
-	return -1;
+	else if (peer->link)
+		return 0;
+	else
+		return -1;
 }
 
 static void mtc_simple_peer_destroy(MtcPeer *p)
@@ -308,6 +354,8 @@ static void mtc_simple_router_destroy(MtcRouter *router)
 		mtc_error("Peers still remaining with router in destruction");
 	
 	mtc_link_async_flush_unref(self->flush);
+	
+	mtc_simple_router_destroy_sync_cache(self);
 }
 
 MtcRouterVTable	mtc_simple_router_vtable =
@@ -326,6 +374,7 @@ MtcRouter *mtc_simple_router_new()
 		
 	mtc_simple_router_init_ring(self);
 	self->flush = mtc_link_async_flush_new();
+	mtc_simple_router_init_sync_cache(self);
 	
 	return (MtcRouter *) self;
 }
@@ -343,6 +392,7 @@ MtcPeer *mtc_simple_router_add(MtcRouter *router, int fd, int close_fd)
 	//Create link
 	peer->link = mtc_fd_link_new(fd, fd);
 	mtc_fd_link_set_close_fd(peer->link, fd);
+	mtc_fd_set_blocking(fd, 0);
 	
 	//Add to router
 	mtc_simple_peer_insert(peer, self);

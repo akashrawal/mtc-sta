@@ -82,5 +82,5 @@ MtcIOStatus mtc_reader_v_read(MtcReaderV *self);
 
 //Sets whether IO operations on fd should block
 //val<0 means do nothing
-int mtc_fd_set_blocking(int fd, int val);
+//int mtc_fd_set_blocking(int fd, int val);
 
