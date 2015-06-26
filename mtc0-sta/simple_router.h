@@ -19,7 +19,13 @@
  * along with MTC-Standalone.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-//TODO: Documentation
+/**
+ * \addtogroup mtc_simple_router
+ * \{
+ * 
+ * A simple distributed object implementation that uses socket 
+ * connection to other peers.
+ */
 
 /**Creates a new simple router
  * \return a new simple router
@@ -31,6 +37,7 @@ MtcRouter *mtc_simple_router_new();
  * \param fd A connection
  * \param close_fd 1 to close the file descriptor 
  *        when peer is destroyed, 0 otherwise
+ * \return A new peer corresponding to the connection
  */
 MtcPeer *mtc_simple_router_add(MtcRouter *router, int fd, int close_fd);
 
@@ -41,5 +48,10 @@ void mtc_simple_peer_disconnect(MtcPeer *peer);
 
 /**Gets whether the peer has an active connection.
  * \param peer A peer belonging to simple router
+ * \return Whether the peer has an active connection.
  */
 int mtc_simple_peer_is_connected(MtcPeer *peer);
+
+/**
+ * \}
+ */

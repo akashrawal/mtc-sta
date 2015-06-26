@@ -18,7 +18,12 @@
  * along with MTC-Standalone.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-//TODO: Documentation category
+/**
+ * \addtogroup mtc_fd_link
+ * \{
+ * 
+ * An MtcLink implementation that transfers data over file descriptors.
+ */
 
 /**Convenient function to switch file descriptor between 
  * blocking and nonblocking IO.
@@ -65,4 +70,6 @@ int mtc_fd_link_get_close_fd(MtcLink *link);
  */
 void mtc_fd_link_set_close_fd(MtcLink *link, int val);
 
-
+/**
+ * \}
+ */

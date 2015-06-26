@@ -18,7 +18,13 @@
  * along with MTC-Standalone.  If not, see <http://www.gnu.org/licenses/>.
  */
  
-//TODO: Section documentation
+/**
+ * \addtogroup mtc_simple_server
+ * \{
+ * 
+ * This module can help you set up a simple server 
+ * based on simple router.
+ */
 
 //MtcPeerSet
 
@@ -138,3 +144,7 @@ void mtc_simple_listener_set_peer_set
  */
 void mtc_simple_listener_unset_peer_set
 	(MtcSimpleListener *listener);
+
+/**
+ * \}
+ */
