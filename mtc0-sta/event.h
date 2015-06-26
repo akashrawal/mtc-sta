@@ -17,7 +17,22 @@
  * You should have received a copy of the GNU General Public License
  * along with MTC-Standalone.  If not, see <http://www.gnu.org/licenses/>.
  */
+ 
+/**\addtogroup mtc_lev_event
+ * \{
+ * 
+ * A libevent based implementation for MTC event-driven framework.
+ */
 
+/**Creates a new libevent based event backend manager.
+ * \param base As returned from event_base_new()
+ * \param destroy_base 1 to destroy base when event manager is
+ *               destroyed, 0 otherwise
+ * \return A new libevent based event backend manager.
+ */
 MtcEventMgr *mtc_lev_event_mgr_new
 	(struct event_base *base, int destroy_base);
 
+/**
+ * \}
+ */

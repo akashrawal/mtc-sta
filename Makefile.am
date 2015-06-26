@@ -1,5 +1,5 @@
 
-SUBDIRS = data mtc0-sta
+SUBDIRS = data mtc0-sta doc
 
 ACLOCAL_AMFLAGS = -I m4
 
