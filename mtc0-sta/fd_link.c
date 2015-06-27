@@ -431,7 +431,8 @@ static MtcLinkIOStatus mtc_fd_link_send(MtcLink *link)
 		else
 			self->jobs.tail = NULL;
 		
-		if (self->jobs.head && self->iov.len)
+		if ((self->jobs.head &&  (! self->iov.len))
+			|| ((! self->jobs.head) &&  self->iov.len))
 			mtc_error("Assertion failure");
 	}
 	
